@@ -15,5 +15,9 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_dim: int = 384
 
+    # ollama_model: str = "gemma2:2b"
+    # ollama_host: str = "localhost"
+    # ollama_port: int = 11434
+
 
 settings = Settings()
