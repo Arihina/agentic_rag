@@ -50,11 +50,6 @@ DEFAULT_CHUNK_OVERLAP = 80
 Block = dict  # {"type": str, "level": int, "text": str, "anchor": str}
 
 
-def _passage_prefix(model_name: str) -> str:
-    """e5-семейство требует префикс 'passage: ' для индексируемых текстов, остальные модели — нет."""
-    return "passage: " if "e5" in model_name.lower() else ""
-
-
 def _find_by_suffix(directory: Path, suffix: str) -> "Path | None":
     for f in sorted(directory.iterdir()):
         if f.is_file() and f.name.endswith(suffix):
@@ -429,13 +424,11 @@ def _bulk_index_chunks(
     chunks:      list[dict],
     source_name: str,
     embedder:    SentenceTransformer,
-    model_name:  str,
 ) -> int:
     if not chunks:
         return 0
 
-    prefix = _passage_prefix(model_name)
-    texts = [prefix + c["text"] for c in chunks]
+    texts = [settings.passage_prefix + c["text"] for c in chunks]
 
     vectors: list[list[float]] = []
     for i in range(0, len(texts), 64):
@@ -507,7 +500,7 @@ def index_documents(
             json_chunks = list(build_chunks(
                 json_blocks, chunk_size, chunk_overlap, "json", json_fname))
             added = _bulk_index_chunks(
-                client, index_name, json_chunks, source_name, embedder, model_name)
+                client, index_name, json_chunks, source_name, embedder)
             total_json += added
             print(f"  JSON → чанков добавлено: {added}")
         else:
@@ -521,7 +514,7 @@ def index_documents(
             md_chunks = list(build_chunks(
                 md_blocks, chunk_size, chunk_overlap, "md", md_file.name))
             added = _bulk_index_chunks(
-                client, index_name, md_chunks, source_name, embedder, model_name)
+                client, index_name, md_chunks, source_name, embedder)
             total_md += added
             print(f"  MD   → чанков добавлено: {added}")
         else:

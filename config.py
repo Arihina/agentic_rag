@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-small"
     embedding_dim: int = 384
 
+    query_prefix: str = "query: "
+    passage_prefix: str = "passage: "
+
     llm_model: str = "gemma2:2b"
     ollama_base_url: str = "http://localhost:11434"
 

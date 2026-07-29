@@ -11,13 +11,12 @@ def get_embedder() -> SentenceTransformer:
 
 
 def embed_query(text: str) -> list[float]:
-    """e5-модели ожидают префикс 'query: ' для поисковых запросов."""
-    vector = get_embedder().encode(f"query: {text}", normalize_embeddings=True)
+    vector = get_embedder().encode(settings.query_prefix +
+                                   text, normalize_embeddings=True)
     return vector.tolist()
 
 
 def embed_passage(text: str) -> list[float]:
-    """e5-модели ожидают префикс 'passage: ' для индексируемых документов."""
-    vector = get_embedder().encode(
-        f"passage: {text}", normalize_embeddings=True)
+    vector = get_embedder().encode(settings.passage_prefix +
+                                   text, normalize_embeddings=True)
     return vector.tolist()
