@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 
 from config import settings
+from context_format import format_context
 from llm_client import generate_structured
 
 
@@ -11,15 +12,6 @@ class GeneratedAnswer(BaseModel):
         description="True, если в найденных фрагментах было достаточно информации для ответа; "
                     "False, если информации недостаточно и это отражено в тексте ответа"
     )
-
-
-def _format_context(chunks: list[dict]) -> str:
-    parts = []
-    for i, hit in enumerate(chunks, start=1):
-        src = hit["_source"]
-        header = f"[{i}] Источник: {src.get('source_file', '?')} | {src.get('breadcrumb', '')}"
-        parts.append(f"{header}\n{src.get('content', '')}")
-    return "\n\n".join(parts)
 
 
 def generate_answer(
@@ -33,7 +25,7 @@ def generate_answer(
             grounded=False,
         )
 
-    context = _format_context(chunks)
+    context = format_context(chunks)
     history_text = ""
     if history:
         history_text = "История диалога:\n" + "\n".join(
