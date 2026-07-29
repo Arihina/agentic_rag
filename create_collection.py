@@ -161,6 +161,48 @@ def parse_content_list_flat(path: Path) -> list[Block]:
     return blocks
 
 
+def _ends_with_semicolon(text: str) -> bool:
+    return text.rstrip().endswith((";", "；"))
+
+
+def _demote_list_titles(blocks: list[Block]) -> list[Block]:
+    """
+    MinerU иногда маркирует пункты перечисления тем же type='title', что и настоящие
+    заголовки разделов (отличаются только по 'level' — перечень на уровень глубже своего
+    анонса). Без этой правки каждый пункт списка становится отдельным изолированным
+    'heading'-чанком и затирает breadcrumb, как будто это реальная иерархия разделов.
+
+    Эвристика: title-блок, заканчивающийся ';' — почти наверняка пункт перечня (типично
+    для русского юридического/регламентного стиля перечислений) — понижаем его до
+    обычного текста, чтобы он влился в соседний параграф под правильным breadcrumb,
+    а не стал самостоятельным заголовком. Последний пункт списка часто без ';' (просто
+    '.') — ловим его отдельно: если предыдущий title в перечне был list-item и текущий
+    НЕ выглядит как анонс нового вложенного списка (не оканчивается на ':'), тоже понижаем.
+    """
+    result: list[Block] = []
+    prev_was_list_item = False
+
+    for block in blocks:
+        if block["type"] != "title":
+            prev_was_list_item = False
+            result.append(block)
+            continue
+
+        text = block["text"]
+        is_list_item = _ends_with_semicolon(text)
+        is_list_tail = prev_was_list_item and not is_list_item and not text.rstrip().endswith(":")
+
+        if is_list_item or is_list_tail:
+            block = {**block, "type": "text"}
+            prev_was_list_item = True
+        else:
+            prev_was_list_item = False
+
+        result.append(block)
+
+    return result
+
+
 def load_json_blocks(office_dir: Path) -> "tuple[list[Block], str] | tuple[None, None]":
     """Возвращает (blocks, filename) или (None, None) если ничего не найдено."""
     for suffix, parser in [
@@ -170,7 +212,7 @@ def load_json_blocks(office_dir: Path) -> "tuple[list[Block], str] | tuple[None,
     ]:
         found = _find_by_suffix(office_dir, suffix)
         if found:
-            return parser(found), found.name
+            return _demote_list_titles(parser(found)), found.name
     return None, None
 
 
