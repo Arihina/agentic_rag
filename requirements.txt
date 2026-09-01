@@ -1,0 +1,23 @@
+# FastAPI-стек
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+
+# HTTP-клиент к ingestion, OpenSearch, и внутри ollama-клиента
+httpx
+
+# OpenSearch (только чтение kb-v2)
+opensearch-py[async]
+
+# LLM
+ollama
+
+# HuggingFace-токенайзер для sliding window; в 2.1 не подключаем в коде,
+# но зависимость нужна к 2.3, а requirements.txt один на сервис.
+tokenizers
+
+# Postgres (появится в 2.3)
+sqlalchemy[asyncio]
+asyncpg
+alembic
