@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-"""Мульти-запросный гибридный поиск: BM25 + kNN, RRF-фьюжн по 2N веткам.
+"""Мульти-запросный гибридный поиск: BM25 + kNN + sparse, RRF-фьюжн по 3N
+веткам.
 
 primary_weight (2.0) для rewritten-ветки — эмпирика: варианты multi-query
 специально «уплывают» синонимами ради recall, доверять им наравне с
 rewritten нельзя, иначе фьюжн тянет выдачу в сторону наименее точного
-варианта.
+варианта. На каждый запрос идёт три ветки — все три получают одинаковый
+вес: primary если i==0, 1.0 иначе.
 
-Индекс: kb-v2. Поля _source приходят все, кроме `content_vector` и
-`content_sparse` (см. SEARCH_SOURCE_EXCLUDES).
+score_threshold задаётся пользователем в косинусах (rag_set.score_threshold),
+конвертится в OpenSearch `_score` через score_from_cosine и применяется ТОЛЬКО
+к kNN-ветке. BM25 и sparse не имеют осмысленной шкалы для порога, отсеиваются
+только глубиной top_k каждой ветки.
 """
 
 from collections import defaultdict
@@ -20,32 +24,6 @@ from app.config import settings
 
 
 SEARCH_SOURCE_EXCLUDES = ["content_vector", "content_sparse"]
-
-
-async def _bm25_search(
-    client: AsyncOpenSearch, index: str, query_text: str, top_k: int,
-) -> list[dict]:
-    body = {
-        "size": top_k,
-        "query": {"match": {"content": query_text}},
-        "_source": {"excludes": SEARCH_SOURCE_EXCLUDES},
-    }
-    resp = await client.search(index=index, body=body)
-    return resp["hits"]["hits"]
-
-
-async def _knn_search(
-    client: AsyncOpenSearch, index: str,
-    query_vector: list[float], top_k: int,
-) -> list[dict]:
-    body = {
-        "size": top_k,
-        "query": {"knn": {"content_vector": {
-            "vector": query_vector, "k": top_k}}},
-        "_source": {"excludes": SEARCH_SOURCE_EXCLUDES},
-    }
-    resp = await client.search(index=index, body=body)
-    return resp["hits"]["hits"]
 
 
 def reciprocal_rank_fusion(
@@ -75,40 +53,60 @@ def reciprocal_rank_fusion(
 
 
 async def multi_query_hybrid_search(
+    rag_id: str,
     os_client: AsyncOpenSearch,
     embed: EmbedClient,
     queries: list[str],
+    /,
     *,
+    score_threshold: float | None = None,
     index: str | None = None,
     bm25_top_k: int | None = None,
     knn_top_k: int | None = None,
+    sparse_top_k: int | None = None,
     final_top_k: int = 10,
     primary_weight: float | None = None,
 ) -> list[dict]:
     """queries[0] — rewritten (основной запрос, повышенный вес);
-    queries[1:] — варианты multi-query."""
+    queries[1:] — варианты multi-query.
+
+    rag_id — positional-only, чтобы синтаксически исключить вызов без
+    tenant-фильтра. score_threshold — в косинусах, конвертится в
+    OpenSearch `min_score` только для kNN-ветки (BM25 и sparse отсекаются
+    только глубиной top_k).
+    """
     if not queries:
         return []
+
+    from app.search.branches import bm25_branch, knn_branch, sparse_branch
+    from app.search.scoring import score_from_cosine
 
     index = index or settings.index_name
     bm25_top_k = bm25_top_k or settings.bm25_top_k
     knn_top_k = knn_top_k or settings.knn_top_k
+    sparse_top_k = sparse_top_k or settings.sparse_top_k
     primary_weight = (primary_weight if primary_weight is not None
                       else settings.primary_weight)
+    knn_min_score = (score_from_cosine(score_threshold)
+                     if score_threshold is not None else None)
 
     items = await embed.embed(queries, pool="query")
-    query_vectors = [item.dense for item in items]
 
     ranked_lists: list[list[dict]] = []
     weights: list[float] = []
     for i, query_text in enumerate(queries):
-        bm25_hits = await _bm25_search(
-            os_client, index, query_text, bm25_top_k)
-        knn_hits = await _knn_search(
-            os_client, index, query_vectors[i], knn_top_k)
+        bm25_hits = await bm25_branch(
+            rag_id, query_text, bm25_top_k,
+            client=os_client, index=index)
+        knn_hits = await knn_branch(
+            rag_id, items[i].dense, knn_top_k, knn_min_score,
+            client=os_client, index=index)
+        sparse_hits = await sparse_branch(
+            rag_id, items[i].sparse, sparse_top_k,
+            client=os_client, index=index)
         weight = primary_weight if i == 0 else 1.0
-        ranked_lists.extend([bm25_hits, knn_hits])
-        weights.extend([weight, weight])
+        ranked_lists.extend([bm25_hits, knn_hits, sparse_hits])
+        weights.extend([weight, weight, weight])
 
     fused = reciprocal_rank_fusion(ranked_lists, weights=weights)
     return fused[:final_top_k]
