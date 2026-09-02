@@ -47,13 +47,16 @@ def _overlap_ratio(new_ids: set[str], existing_ids: set[str]) -> float:
 
 
 async def run_agent(
+    rag_id: str,
     os_client: AsyncOpenSearch,
     llm: LLMClient,
     embed: EmbedClient,
     user_query: str,
+    /,
     history: list[dict[str, str]] | None = None,
     *,
     top_k: int = 10,
+    score_threshold: float | None = None,
     max_iterations: int | None = None,
     index: str | None = None,
     answer_system_prompt: str | None = None,
@@ -71,7 +74,9 @@ async def run_agent(
 
     for iteration in range(1, max_iterations + 1):
         new_results = await multi_query_hybrid_search(
-            os_client, embed, queries, index=index, final_top_k=top_k)
+            rag_id, os_client, embed, queries,
+            score_threshold=score_threshold,
+            index=index, final_top_k=top_k)
         new_ids = {hit["_id"] for hit in new_results}
         existing_ids = set(pool.keys())
         overlap = (_overlap_ratio(new_ids, existing_ids)
