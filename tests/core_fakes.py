@@ -109,14 +109,28 @@ class FakeOpenSearch:
         return {"hits": {"hits": hits}}
 
 
-def hit(chunk_id: str, content: str = "текст", **extra) -> dict:
-    """Хелпер: собрать hit в старом формате indices (knowledge_base).
-    В 2.2.b перейдём на kb-v2 — тест-хелпер тоже переделаем."""
+def hit(
+    chunk_id: str,
+    content: str = "текст",
+    *,
+    rag_id: str = "00000000-0000-0000-0000-000000000000",
+    document_id: str = "d1",
+    chunk_index: int = 0,
+    headings: list[str] | None = None,
+    pages: list[int] | None = None,
+    **extra,
+) -> dict:
+    """Хелпер: собрать hit в формате kb-v2. `chunk_id` в реальности —
+    blake2b-хеш, но нам в тестах важна только его уникальность и
+    сопоставление hit["_id"]; вычислять хеш не нужно."""
     src = {
-        "chunk_id": chunk_id, "doc_id": "d1",
-        "content": content, "breadcrumb": "path/to/doc",
-        "chunk_type": "paragraph", "source_file": "doc.pdf",
-        "anchor": "", "source_format": "pdf",
+        "rag_id": rag_id,
+        "document_id": document_id,
+        "chunk_index": chunk_index,
+        "content": content,
+        "headings": headings if headings is not None else [],
+        "pages": pages if pages is not None else [],
+        "content_hash": "0" * 32,
     }
     src.update(extra)
     return {"_id": chunk_id, "_score": 1.0, "_source": src}

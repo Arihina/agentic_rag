@@ -62,6 +62,34 @@ class MultiQueryHybridSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(embed.call_log), 0,
                          "пустой список не должен звать embed")
 
+    async def test_source_excludes_dense_and_sparse(self):
+        """Запросы обязаны исключать content_vector и content_sparse из
+        _source, иначе на каждый hit прилетает 1024-мерный dense — сотни
+        КБ payload'а на топ-50 без всякой пользы."""
+        embed = FakeEmbed()
+        os_client = FakeOpenSearch(responses=[[hit("a")]])
+        await multi_query_hybrid_search(
+            os_client, embed, ["q"], final_top_k=5)
+
+        for call in os_client.call_log:
+            src = call["body"].get("_source")
+            self.assertIsInstance(src, dict,
+                                  "_source должен быть {'excludes': [...]}, "
+                                  "а не whitelist — иначе новые поля в "
+                                  "kb-v2 будут молча теряться")
+            self.assertIn("content_vector", src.get("excludes", []))
+            self.assertIn("content_sparse", src.get("excludes", []))
+
+    async def test_index_defaults_to_kb_v2(self):
+        """Индекс по умолчанию берётся из settings.index_name (kb-v2)."""
+        from app.config import settings
+        embed = FakeEmbed()
+        os_client = FakeOpenSearch(responses=[[hit("a")]])
+        await multi_query_hybrid_search(
+            os_client, embed, ["q"], final_top_k=5)
+        for call in os_client.call_log:
+            self.assertEqual(call["index"], settings.index_name)
+
 
 if __name__ == "__main__":
     unittest.main()
