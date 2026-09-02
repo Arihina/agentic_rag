@@ -6,6 +6,9 @@ primary_weight (2.0) для rewritten-ветки — эмпирика: вари�
 специально «уплывают» синонимами ради recall, доверять им наравне с
 rewritten нельзя, иначе фьюжн тянет выдачу в сторону наименее точного
 варианта.
+
+Индекс: kb-v2. Поля _source приходят все, кроме `content_vector` и
+`content_sparse` (см. SEARCH_SOURCE_EXCLUDES).
 """
 
 from collections import defaultdict
@@ -15,8 +18,8 @@ from opensearchpy import AsyncOpenSearch
 from app.clients.embed import EmbedClient
 from app.config import settings
 
-_SOURCE_FIELDS = ["chunk_id", "doc_id", "content", "breadcrumb",
-                  "chunk_type", "source_file", "anchor", "source_format"]
+
+SEARCH_SOURCE_EXCLUDES = ["content_vector", "content_sparse"]
 
 
 async def _bm25_search(
@@ -25,7 +28,7 @@ async def _bm25_search(
     body = {
         "size": top_k,
         "query": {"match": {"content": query_text}},
-        "_source": _SOURCE_FIELDS,
+        "_source": {"excludes": SEARCH_SOURCE_EXCLUDES},
     }
     resp = await client.search(index=index, body=body)
     return resp["hits"]["hits"]
@@ -39,7 +42,7 @@ async def _knn_search(
         "size": top_k,
         "query": {"knn": {"content_vector": {
             "vector": query_vector, "k": top_k}}},
-        "_source": _SOURCE_FIELDS,
+        "_source": {"excludes": SEARCH_SOURCE_EXCLUDES},
     }
     resp = await client.search(index=index, body=body)
     return resp["hits"]["hits"]
