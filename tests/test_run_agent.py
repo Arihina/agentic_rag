@@ -2,8 +2,12 @@ from __future__ import annotations
 
 """Тесты run_agent — сборка агентского цикла на fakes.
 
-Проверяем поведение стоп-условий и обработку истории. Один канонический
-happy path + отдельные тесты на каждую из трёх причин остановки.
+Проверяем поведение стоп-условий и обработку истории. rag_id для всех
+вызовов один и тот же (агентский цикл не переключает набор в середине
+диалога), просто первый positional-only параметр.
+
+С sparse-веткой каждая итерация делает 3N search-вызовов вместо 2N в
+2.2.a — счётчики в тестах обновлены.
 """
 
 import unittest
@@ -12,6 +16,8 @@ from app.core.agent import run_agent
 from app.core.answer import GeneratedAnswer
 from app.core.evaluation import EvalResult
 from tests.core_fakes import FakeEmbed, FakeLLM, FakeOpenSearch, hit
+
+RAG = "11111111-1111-1111-1111-111111111111"
 
 
 class RunAgentTests(unittest.IsolatedAsyncioTestCase):
@@ -26,7 +32,7 @@ class RunAgentTests(unittest.IsolatedAsyncioTestCase):
         os_client = FakeOpenSearch(responses=[[hit("a"), hit("b")]])
 
         trace = await run_agent(
-            os_client, llm, embed, "как настроить X", top_k=5)
+            RAG, os_client, llm, embed, "как настроить X", top_k=5)
 
         self.assertEqual(trace.stopped_reason, "sufficient")
         self.assertEqual(len(trace.iterations), 1)
@@ -34,25 +40,26 @@ class RunAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(trace.answer.answer, "готово")
 
     async def test_max_iterations_when_never_sufficient(self):
-        """Eval всегда говорит insufficient — доходим до max_iterations."""
+        """Eval всегда insufficient → доходим до max_iterations.
+
+        На итерации 1: 3 запроса × 3 ветки (bm25+knn+sparse) = 9 search-вызовов.
+        На итерациях 2 и 3: 1 запрос из next_queries × 3 = 3 вызова.
+        Между итерациями возвращаем разные документы, чтобы overlap не
+        достиг порога diminishing_returns."""
         llm = FakeLLM(
             evaluator=lambda p, c: EvalResult(
                 sufficient=False, next_queries=["nq"]),
             answerer=lambda p, c: GeneratedAnswer(answer="частично",
                                                   grounded=False))
         embed = FakeEmbed()
-        # На итерации 1 три запроса (rewritten + 2 варианта) × BM25+kNN = 6
-        # search-вызовов; на итерациях 2 и 3 — по одному запросу из
-        # next_queries × 2 = 2 вызова. Между итерациями возвращаем разные
-        # документы, чтобы overlap не достиг порога diminishing_returns.
         it1 = [hit(f"iter1_{i}") for i in range(3)]
         it2 = [hit(f"iter2_{i}") for i in range(3)]
         it3 = [hit(f"iter3_{i}") for i in range(3)]
         os_client = FakeOpenSearch(
-            responses=[it1] * 6 + [it2] * 2 + [it3] * 2)
+            responses=[it1] * 9 + [it2] * 3 + [it3] * 3)
 
         trace = await run_agent(
-            os_client, llm, embed, "как настроить X",
+            RAG, os_client, llm, embed, "как настроить X",
             top_k=5, max_iterations=3)
 
         self.assertEqual(trace.stopped_reason, "max_iterations")
@@ -72,7 +79,7 @@ class RunAgentTests(unittest.IsolatedAsyncioTestCase):
         os_client = FakeOpenSearch(responses=[common])
 
         trace = await run_agent(
-            os_client, llm, embed, "как настроить X",
+            RAG, os_client, llm, embed, "как настроить X",
             top_k=5, max_iterations=3)
 
         self.assertEqual(trace.stopped_reason, "diminishing_returns")
@@ -87,13 +94,10 @@ class RunAgentTests(unittest.IsolatedAsyncioTestCase):
         os_client = FakeOpenSearch(responses=[[hit("a")]])
 
         trace = await run_agent(
-            os_client, llm, embed, "первый вопрос", history=None)
+            RAG, os_client, llm, embed, "первый вопрос", history=None)
 
-        # В call_log fake-LLM должно быть: QueryVariants, EvalResult,
-        # GeneratedAnswer — но НЕ RewrittenQuery.
         called_models = [name for name, _ in llm.call_log]
         self.assertNotIn("RewrittenQuery", called_models)
-        # А rewritten в trace — сам исходный запрос, без правок.
         self.assertEqual(trace.rewritten_query, "первый вопрос")
 
     async def test_history_triggers_rewriter(self):
@@ -105,7 +109,7 @@ class RunAgentTests(unittest.IsolatedAsyncioTestCase):
         os_client = FakeOpenSearch(responses=[[hit("a")]])
 
         trace = await run_agent(
-            os_client, llm, embed, "а он тоже так делает?",
+            RAG, os_client, llm, embed, "а он тоже так делает?",
             history=[{"role": "user", "content": "расскажи про X"},
                      {"role": "assistant", "content": "X делает то-то"}])
 
@@ -121,7 +125,7 @@ class RunAgentTests(unittest.IsolatedAsyncioTestCase):
         os_client = FakeOpenSearch(responses=[[]])
 
         trace = await run_agent(
-            os_client, llm, embed, "невозможный запрос",
+            RAG, os_client, llm, embed, "невозможный запрос",
             top_k=5, max_iterations=2)
 
         self.assertEqual(trace.final_chunks, [])
