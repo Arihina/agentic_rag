@@ -15,7 +15,9 @@ from fastapi.testclient import TestClient
 
 from app.state import state
 from tests import base
-from tests.support import FakeEmbed, FakeIngest, FakeLLM, FakeOpenSearch
+from tests.support import (
+    FakeEmbed, FakeIngest, FakeLLM, FakeOpenSearch, FakeSessionMaker,
+)
 
 
 class HealthEndpointTests(unittest.TestCase):
@@ -46,7 +48,8 @@ class HealthEndpointTests(unittest.TestCase):
         with TestClient(self.main.app) as client:
             self._override(os_client=FakeOpenSearch(True),
                            llm=FakeLLM(True),
-                           embed=FakeEmbed(True))
+                           embed=FakeEmbed(True),
+                           session_maker=FakeSessionMaker(True))
             response = client.get("/health")
             self.assertEqual(response.status_code, 200)
             body = response.json()
@@ -55,12 +58,14 @@ class HealthEndpointTests(unittest.TestCase):
             self.assertTrue(body["opensearch"])
             self.assertTrue(body["ollama"])
             self.assertTrue(body["ingestion"])
+            self.assertTrue(body["database"])
 
     def test_health_reports_degraded_when_one_down(self):
         with TestClient(self.main.app) as client:
             self._override(os_client=FakeOpenSearch(True),
                            llm=FakeLLM(False),  # ollama лежит
-                           embed=FakeEmbed(True))
+                           embed=FakeEmbed(True),
+                           session_maker=FakeSessionMaker(True))
             response = client.get("/health")
             self.assertEqual(response.status_code, 200,
                              "health возвращает 200 даже при degraded — иначе "
@@ -68,6 +73,20 @@ class HealthEndpointTests(unittest.TestCase):
             body = response.json()
             self.assertEqual(body["status"], "degraded")
             self.assertFalse(body["ollama"])
+
+    def test_health_reports_degraded_when_db_down(self):
+        """Регрессия: упавший Postgres тоже должен давать degraded,
+        а не невнятный 500 при попытке SELECT 1."""
+        with TestClient(self.main.app) as client:
+            self._override(os_client=FakeOpenSearch(True),
+                           llm=FakeLLM(True),
+                           embed=FakeEmbed(True),
+                           session_maker=FakeSessionMaker(False))
+            response = client.get("/health")
+            self.assertEqual(response.status_code, 200)
+            body = response.json()
+            self.assertEqual(body["status"], "degraded")
+            self.assertFalse(body["database"])
 
     def test_ready_endpoint_returns_200_after_lifespan(self):
         with TestClient(self.main.app) as client:

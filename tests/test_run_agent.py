@@ -115,9 +115,55 @@ class RunAgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(trace.rewritten_query, "переписанный запрос")
 
+    async def test_empty_pool_first_iteration_exits_early(self):
+        """OpenSearch не нашёл ничего на первой итерации → выход
+        `empty_pool` сразу, не тратим оставшийся бюджет и не зовём eval с
+        предсказуемо тем же запросом ещё раз."""
+        llm = FakeLLM(
+            evaluator=lambda p, c: EvalResult(
+                sufficient=False, next_queries=["nq"]))
+        embed = FakeEmbed()
+        os_client = FakeOpenSearch(responses=[[]])
+
+        trace = await run_agent(
+            RAG, os_client, llm, embed, "невозможный запрос",
+            top_k=5, max_iterations=3)
+
+        self.assertEqual(trace.stopped_reason, "empty_pool")
+        self.assertEqual(len(trace.iterations), 1,
+                         "empty_pool должен обрубать после первой итерации")
+        self.assertEqual(trace.final_chunks, [])
+        self.assertFalse(trace.answer.grounded)
+
+    async def test_empty_pool_not_triggered_when_first_iter_finds_docs(self):
+        """Регрессия: если первая итерация ЧТО-ТО нашла, empty_pool не
+        должен ложно срабатывать, даже если вторая итерация вернёт ноль
+        новых — там сработает уже diminishing_returns (overlap=1 на
+        пустом new_ids)."""
+        llm = FakeLLM(
+            evaluator=lambda p, c: EvalResult(
+                sufficient=False, next_queries=["nq"]),
+            answerer=lambda p, c: GeneratedAnswer(answer="ok", grounded=True))
+        embed = FakeEmbed()
+        # Итерация 1: находим 2 документа. Итерация 2: ничего нового.
+        os_client = FakeOpenSearch(responses=[
+            [hit("a"), hit("b")],  # первая итерация — что-то нашли
+            [],                     # вторая — пусто
+        ])
+
+        trace = await run_agent(
+            RAG, os_client, llm, embed, "как настроить X",
+            top_k=5, max_iterations=3)
+
+        self.assertNotEqual(trace.stopped_reason, "empty_pool",
+                            "empty_pool не должен ложно срабатывать, если "
+                            "пул уже был непуст к моменту второй итерации")
+        self.assertEqual(trace.stopped_reason, "diminishing_returns")
+
     async def test_no_chunks_returns_ungrounded_answer(self):
-        """OpenSearch не нашёл ничего за все итерации — answer помечен
-        grounded=false, а не крэш."""
+        """OpenSearch не нашёл ничего — answer помечен grounded=false,
+        а не крэш. При этом stop_reason уже empty_pool (см. выше тест),
+        цикл не крутится вхолостую."""
         llm = FakeLLM(
             evaluator=lambda p, c: EvalResult(
                 sufficient=False, next_queries=["nq"]))

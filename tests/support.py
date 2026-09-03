@@ -50,3 +50,59 @@ class FakeEmbed:
 class FakeIngest:
     async def close(self) -> None:
         pass
+
+
+class _FakeExecuteResult:
+    def scalar_one(self):
+        return 1
+
+    def scalar_one_or_none(self):
+        return None
+
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
+
+
+class _FakeSession:
+    """Минимальный совместимый с AsyncSession API — только то, что зовёт
+    health-check (`session.execute(text("SELECT 1"))`) и тесты, которые
+    хотят подменить БД без поднятого Postgres."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def execute(self, *args, **kwargs):
+        return _FakeExecuteResult()
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):
+        pass
+
+    async def close(self):
+        pass
+
+
+class FakeSessionMaker:
+    """Замена async_sessionmaker: возвращает _FakeSession как async CM.
+    Тесты кладут в state.session_maker; SELECT 1 в health отвечает всегда OK,
+    без поднятой БД."""
+    ping_ok: bool = True
+
+    def __init__(self, ping_ok: bool = True):
+        self.ping_ok = ping_ok
+
+    def __call__(self):
+        if not self.ping_ok:
+            class _Broken(_FakeSession):
+                async def execute(self, *args, **kwargs):
+                    raise RuntimeError("fake БД недоступна")
+            return _Broken()
+        return _FakeSession()
