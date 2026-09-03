@@ -54,18 +54,17 @@ class Settings(BaseSettings):
     multi_query_variants_count: int = 3
 
     max_iterations: int = 3
-
     early_stop_overlap_ratio: float = 0.8
 
 
     tokenizer_repo: str = "Qwen/Qwen3-8B"
     history_token_limit: int = 6000
-
     history_overflow: str = "truncate"
 
     sse_heartbeat_interval: float = 15.0
 
-    database_url: str = "postgresql+asyncpg://rag:rag@localhost:5432/agentic_rag"
+    database_url: str = (
+        "postgresql+asyncpg://rag:rag@localhost:5437/agentic_rag?ssl=disable")
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
