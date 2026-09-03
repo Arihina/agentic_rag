@@ -4,11 +4,17 @@ from __future__ import annotations
 
 Цикл останавливается по одной из причин (`stopped_reason`):
   - "sufficient" — eval сказал, что данных достаточно;
+  - "empty_pool" — по всем 3N веткам вернулся ноль хитов, продолжать
+    бессмысленно: следующие итерации с next_queries почти наверняка тоже
+    пусты (маппинг индекса не меняется, фильтр по rag_id тоже), а eval
+    при пустом контексте возвращает [query] как next_queries — тот же
+    самый запрос;
   - "diminishing_returns" — новые запросы приносят те же документы;
   - "max_iterations" — исчерпан бюджет итераций.
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from opensearchpy import AsyncOpenSearch
 
@@ -20,6 +26,10 @@ from app.core.evaluation import EvalResult, evaluate
 from app.core.multi_query import generate_query_variants
 from app.core.rewriter import rewrite_query
 from app.search.hybrid import multi_query_hybrid_search
+
+
+StoppedReason = Literal[
+    "sufficient", "empty_pool", "diminishing_returns", "max_iterations"]
 
 
 @dataclass
@@ -96,6 +106,9 @@ async def run_agent(
 
         if eval_result.sufficient:
             trace.stopped_reason = "sufficient"
+            break
+        if not pool:
+            trace.stopped_reason = "empty_pool"
             break
         if (iteration > 1
                 and overlap >= settings.early_stop_overlap_ratio):
