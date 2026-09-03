@@ -1,16 +1,6 @@
 from __future__ import annotations
 
-"""Agentic RAG — сервис на одном порту (8020).
-
-Один процесс, один FastAPI-app. В отличие от ingestion, тут нет разделения
-на публичный/внутренний порт: наружу (через мастер) уходит только
-Responses API и платформенные ручки чатов, а «внутренних» ручек, доступных
-только сервисам платформы, у нас нет — все клиенты внешние.
-
-Lifespan держит четыре ресурса: OpenSearch (чтение kb-v2), Ollama (LLM),
-и два httpx-клиента к ingestion (/embed и /v1/internal/*). Postgres
-подключим в 2.3, вместе с моделями и Alembic.
-"""
+"""Agentic RAG — сервис на одном порту (8020)."""
 
 import asyncio
 import logging
@@ -26,6 +16,7 @@ from app.clients.ingest import IngestClient
 from app.clients.llm import LLMClient
 from app.clients.opensearch import make_opensearch_client
 from app.config import settings
+from app.db.session import dispose_db, make_engine, make_session_maker
 from app.state import state
 
 logger = logging.getLogger(__name__)
@@ -38,6 +29,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state.llm = LLMClient()
     state.embed = EmbedClient()
     state.ingest = IngestClient()
+    state.db_engine = make_engine()
+    state.session_maker = make_session_maker(state.db_engine)
 
     state.ready.set()
     logger.info("Готов, порт %s", settings.port)
@@ -49,6 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state.llm.close(),
         state.embed.close(),
         state.ingest.close(),
+        dispose_db(state.db_engine),
         return_exceptions=True,
     )
 

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from opensearchpy import AsyncOpenSearch
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
     from app.clients.embed import EmbedClient
     from app.clients.ingest import IngestClient
@@ -23,6 +24,8 @@ class AppState:
     llm: "LLMClient"
     embed: "EmbedClient"
     ingest: "IngestClient"
+    db_engine: "AsyncEngine"
+    session_maker: "async_sessionmaker[AsyncSession]"
     ready: asyncio.Event
 
 

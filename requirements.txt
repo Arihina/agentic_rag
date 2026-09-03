@@ -21,3 +21,5 @@ tokenizers
 sqlalchemy[asyncio]
 asyncpg
 alembic
+
+aiosqlite

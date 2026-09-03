@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-"""GET /health — состояние сервиса и его внешних зависимостей.
-
-Возвращает 200 всегда, даже если что-то не ready: аналог liveness. Поле
-`status` — "ok" / "degraded" — сигнал для monitoring, но не повод для
-kubernetes бить сервис по голове (иначе цепочка «ingestion упал →
-agentic_rag стал degraded → рестарт → снова degraded» бесполезна).
-
-Для настоящего readiness (kubernetes probe перед вливанием трафика)
-предусмотрен GET /health/ready — 503, пока state.ready не поставлен.
-"""
+"""GET /health — состояние сервиса и его внешних зависимостей."""
 
 import logging
 
@@ -31,6 +22,7 @@ class HealthResponse(BaseModel):
     opensearch: bool
     ollama: bool
     ingestion: bool
+    database: bool
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -38,7 +30,7 @@ async def health() -> HealthResponse:
     if not state.ready.is_set():
         return HealthResponse(
             status="starting", ready=False,
-            opensearch=False, ollama=False, ingestion=False)
+            opensearch=False, ollama=False, ingestion=False, database=False)
 
     try:
         opensearch_ok = await state.os_client.ping()
@@ -49,13 +41,23 @@ async def health() -> HealthResponse:
     ollama_ok = await state.llm.ping()
     ingestion_ok = await state.embed.ping()
 
-    checks = (opensearch_ok, ollama_ok, ingestion_ok)
+    database_ok = False
+    try:
+        async with state.session_maker() as session:
+            from sqlalchemy import text
+            await session.execute(text("SELECT 1"))
+        database_ok = True
+    except Exception:
+        logger.warning("postgres недоступен", exc_info=True)
+
+    checks = (opensearch_ok, ollama_ok, ingestion_ok, database_ok)
     return HealthResponse(
         status="ok" if all(checks) else "degraded",
         ready=True,
         opensearch=opensearch_ok,
         ollama=ollama_ok,
         ingestion=ingestion_ok,
+        database=database_ok,
     )
 
 
