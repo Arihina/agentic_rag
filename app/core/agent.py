@@ -14,7 +14,7 @@ from __future__ import annotations
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Awaitable, Callable, Literal
 
 from opensearchpy import AsyncOpenSearch
 
@@ -30,6 +30,12 @@ from app.search.hybrid import multi_query_hybrid_search
 
 StoppedReason = Literal[
     "sufficient", "empty_pool", "diminishing_returns", "max_iterations"]
+
+
+class ClientDisconnected(Exception):
+    """cancel_hook вернул True — клиент отвалился, дальше работать
+    незачем. Отдельный класс (не CancelledError), чтобы run_turn мог
+    различить нашу явную отмену и общий asyncio.CancelledError."""
 
 
 @dataclass
@@ -71,18 +77,29 @@ async def run_agent(
     index: str | None = None,
     answer_system_prompt: str | None = None,
     answer_temperature: float | None = None,
+    cancel_hook: Callable[[], Awaitable[bool]] | None = None,
 ) -> AgentTrace:
     max_iterations = max_iterations or settings.max_iterations
     history = history or []
 
+    async def _check_cancel() -> None:
+        """Проверка между стадиями цикла. Если клиент отвалился —
+        бросаем ClientDisconnected до следующего LLM/OpenSearch-вызова,
+        чтобы не тратить бюджет впустую."""
+        if cancel_hook is not None and await cancel_hook():
+            raise ClientDisconnected()
+
+    await _check_cancel()
     rewritten = await rewrite_query(llm, history, user_query)
     trace = AgentTrace(rewritten_query=rewritten)
 
     pool: dict[str, dict] = {}
+    await _check_cancel()
     variants = await generate_query_variants(llm, rewritten)
     queries = [rewritten, *variants]
 
     for iteration in range(1, max_iterations + 1):
+        await _check_cancel()
         new_results = await multi_query_hybrid_search(
             rag_id, os_client, embed, queries,
             score_threshold=score_threshold,
@@ -95,6 +112,7 @@ async def run_agent(
         for hit in new_results:
             pool.setdefault(hit["_id"], hit)
 
+        await _check_cancel()
         eval_result = await evaluate(llm, user_query, list(pool.values()))
         trace.iterations.append(IterationLog(
             iteration=iteration,
@@ -122,6 +140,7 @@ async def run_agent(
                    else [user_query])
 
     trace.final_chunks = list(pool.values())
+    await _check_cancel()
     trace.answer = await generate_answer(
         llm, user_query, trace.final_chunks, history,
         system_prompt=answer_system_prompt,
