@@ -48,8 +48,64 @@ class FakeEmbed:
 
 @dataclass
 class FakeIngest:
+    """Fake IngestClient для тестов сервисного слоя.
+
+    По умолчанию get_rag возвращает валидный ready-набор с id, который
+    попросили. Кастомизация — через set_rag() для конкретных id или
+    set_error() для эмуляции сбоев ingestion. Реальный HTTP не идёт.
+    """
+
+    def __init__(self):
+        # rag_id -> RagConfig-like dict, из которого get_rag соберёт объект.
+        self._configs: dict[str, dict] = {}
+        # rag_id -> исключение, которое надо бросить вместо возврата.
+        self._errors: dict[str, Exception] = {}
+        # Глобальный сбой (например, IngestError на все запросы).
+        self._global_error: Exception | None = None
+        self.get_rag_calls: list[tuple[str, str]] = []
+
+    def set_rag(self, rag_id, *, name="Тестовый набор", status="ready",
+                prompt=None, temperature=0.3, top_k=10,
+                score_threshold=0.0):
+        """Задать возврат get_rag для конкретного rag_id."""
+        self._configs[str(rag_id)] = {
+            "name": name, "status": status, "prompt": prompt,
+            "temperature": temperature, "top_k": top_k,
+            "score_threshold": score_threshold,
+        }
+
+    def set_error(self, rag_id, exc: Exception):
+        """Задать исключение для конкретного rag_id."""
+        self._errors[str(rag_id)] = exc
+
+    def set_global_error(self, exc: Exception | None):
+        self._global_error = exc
+
     async def close(self) -> None:
         pass
+
+    async def get_rag(self, rag_id, user_id):
+        from app.clients.ingest import RagConfig
+        import uuid as _uuid
+
+        self.get_rag_calls.append((str(rag_id), str(user_id)))
+
+        if self._global_error is not None:
+            raise self._global_error
+        if str(rag_id) in self._errors:
+            raise self._errors[str(rag_id)]
+
+        cfg = self._configs.get(str(rag_id))
+        if cfg is None:
+            from app.clients.ingest import RagNotFound
+            raise RagNotFound(str(rag_id))
+
+        return RagConfig(
+            id=_uuid.UUID(str(rag_id)),
+            name=cfg["name"], status=cfg["status"],
+            prompt=cfg["prompt"], temperature=cfg["temperature"],
+            top_k=cfg["top_k"], score_threshold=cfg["score_threshold"],
+        )
 
 
 class _FakeExecuteResult:
@@ -101,6 +157,7 @@ class FakeSessionMaker:
 
     def __call__(self):
         if not self.ping_ok:
+            # Эмулируем недоступность БД — execute падает.
             class _Broken(_FakeSession):
                 async def execute(self, *args, **kwargs):
                     raise RuntimeError("fake БД недоступна")
