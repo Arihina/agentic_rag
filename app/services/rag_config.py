@@ -10,6 +10,7 @@ from app.clients.ingest import IngestClient, IngestError, RagNotFound
 from app.config import settings
 
 
+
 class InvalidModelForm(ValueError):
     """`model` не в формате `rag/<uuid>`."""
 
@@ -35,8 +36,10 @@ class RagLookupFailed(RuntimeError):
     """Ingestion не ответил (сетевой сбой, 5xx)"""
 
 
+
 @dataclass(frozen=True, slots=True)
 class ResolvedRag:
+    """Всё, что нужно run_agent'у и API-слою после резолва набора."""
     rag_id: uuid.UUID
     name: str
     top_k: int
@@ -85,13 +88,7 @@ async def resolve_rag_for_turn(
             f"к {conversation_rag_id} — набор нельзя сменить в середине "
             "диалога, начните новый чат")
 
-    try:
-        cfg = await ingest.get_rag(rag_id, user_id)
-    except RagNotFound:
-        raise
-    except IngestError as e:
-        raise RagLookupFailed(
-            f"Не удалось получить конфиг набора {rag_id}: {e}")
+    cfg = await _fetch_rag_config(rag_id, user_id, ingest)
 
     if cfg.status != "ready":
         raise RagUnavailable(cfg.id, cfg.status)
@@ -104,6 +101,29 @@ async def resolve_rag_for_turn(
         answer_temperature=cfg.temperature,
         answer_system_prompt=compose_answer_system_prompt(cfg.prompt),
     )
+
+
+async def validate_rag_exists(
+    rag_id: uuid.UUID,
+    user_id: uuid.UUID,
+    ingest: IngestClient,
+):
+    return await _fetch_rag_config(rag_id, user_id, ingest)
+
+
+async def _fetch_rag_config(
+    rag_id: uuid.UUID,
+    user_id: uuid.UUID,
+    ingest: IngestClient,
+):
+    """Общий вызов в ingestion с единой обработкой сетевых сбоев."""
+    try:
+        return await ingest.get_rag(rag_id, user_id)
+    except RagNotFound:
+        raise
+    except IngestError as e:
+        raise RagLookupFailed(
+            f"Не удалось получить конфиг набора {rag_id}: {e}")
 
 
 def compose_answer_system_prompt(rag_prompt: str | None) -> str:
