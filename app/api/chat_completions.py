@@ -13,6 +13,7 @@ from app.db import repository as repo
 from app.db.repository import NotFoundOrForbidden
 from app.db.session import get_session
 from app.schemas.feedback import FeedbackIn, FeedbackOut
+from app.schemas.sources import SourceOut, SourcesListOut
 
 router = APIRouter(
     prefix="/v1/chat/completions", tags=["chat_completions"])
@@ -67,6 +68,32 @@ async def delete_feedback(
         raise HTTPException(404, "Сообщение не найдено")
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{message_id}/sources", response_model=SourcesListOut)
+async def list_sources(
+    message_id: str = Path(...),
+    user_id: uuid.UUID = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> SourcesListOut:
+    mid = _parse_id(message_id)
+    try:
+        rows = await repo.list_sources(session, mid, user_id)
+    except NotFoundOrForbidden:
+        raise HTTPException(404, "Сообщение не найдено")
+
+    return SourcesListOut(
+        data=[
+            SourceOut(
+                order=r.order,
+                chunk_id=r.chunk_id,
+                document_id=r.document_id,
+                chunk_index=r.chunk_index,
+                filename=r.filename,
+            )
+            for r in rows
+        ]
+    )
 
 
 def _parse_id(raw: str) -> uuid.UUID:
