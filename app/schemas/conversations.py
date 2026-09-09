@@ -56,3 +56,4 @@ class MessageOut(BaseModel):
 class MessagesListOut(BaseModel):
     """Обёртка для GET /v1/platform/conversations/{id}/messages."""
     data: list[MessageOut]
+    has_more: bool = False

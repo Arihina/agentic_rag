@@ -38,7 +38,7 @@ from opensearchpy import AsyncOpenSearch
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.clients.embed import EmbedClient
-from app.clients.ingest import IngestClient, RagNotFound
+from app.clients.ingest import IngestClient, IngestError, RagNotFound
 from app.clients.llm import LLMClient
 from app.core.agent import ClientDisconnected, run_agent
 from app.db import repository as repo
@@ -146,14 +146,17 @@ async def run_turn(
             history, request_body.input, resolved.answer_system_prompt,
             trace.final_chunks, answer_text)
 
+        filenames = await _resolve_filenames(
+            trace.final_chunks, user_id, ingest)
+
         async with session_maker() as session:
             await repo.mark_message_ok(session, msg_id, answer_text)
             await repo.add_sources(session, msg_id, [
                 SourceIn(
                     chunk_id=hit["_id"],
-                    document_id=uuid.UUID(hit["_source"]["document_id"]),
+                    document_id=_doc_id(hit),
                     chunk_index=int(hit["_source"]["chunk_index"]),
-                    filename=hit["_source"].get("filename", "(документ)"),
+                    filename=filenames.get(_doc_id(hit), "(удалён)"),
                     rag_id=resolved.rag_id,
                     order=i + 1,
                 )
@@ -242,3 +245,29 @@ def _estimate_usage(
     prompt_tokens = sum(count_tokens(p, tokenizer) for p in prompt_parts)
     completion_tokens = count_tokens(answer_text, tokenizer)
     return prompt_tokens, completion_tokens
+
+
+def _doc_id(hit: dict) -> uuid.UUID:
+    """Единый extractor document_id из hit."""
+    return uuid.UUID(hit["_source"]["document_id"])
+
+
+async def _resolve_filenames(
+    chunks: list[dict],
+    user_id: uuid.UUID,
+    ingest: IngestClient,
+) -> dict[uuid.UUID, str]:
+    """Batch-подстановка filename для всех документов, встречающихся в
+    финальном пуле. При сбое ingestion возвращает пустой dict —
+    вызывающий код подставит "(удалён)" плейсхолдер для всех."""
+    if not chunks:
+        return {}
+
+    doc_ids = list({_doc_id(hit) for hit in chunks})
+    try:
+        return await ingest.lookup_documents(user_id, doc_ids)
+    except IngestError:
+        logger.warning(
+            "run_turn: lookup_documents упал, filenames будут "
+            "плейсхолдерами", exc_info=True)
+        return {}

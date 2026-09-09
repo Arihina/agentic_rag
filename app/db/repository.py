@@ -158,16 +158,34 @@ async def list_messages(
     session: AsyncSession,
     conversation_id: uuid.UUID,
     user_id: uuid.UUID,
+    *,
+    limit: int | None = None,
+    before: datetime | None = None,
 ) -> list[Message]:
+    """Все сообщения диалога включая `failed`"""
     await get_conversation(session, conversation_id, user_id)
+
+    if limit is None:
+        stmt = (select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.created_at, Message.id))
+        return list((await session.execute(stmt)).scalars().all())
+
     stmt = (select(Message)
             .where(Message.conversation_id == conversation_id)
-            .order_by(Message.created_at))
-    return list((await session.execute(stmt)).scalars().all())
+            .order_by(Message.created_at.desc(), Message.id.desc())
+            .limit(limit))
+    if before is not None:
+        stmt = stmt.where(Message.created_at < before)
+
+    rows = list((await session.execute(stmt)).scalars().all())
+    rows.reverse()
+    return rows
 
 
 @dataclass(frozen=True, slots=True)
 class SourceIn:
+    """Входные данные для записи одного источника ответа."""
     chunk_id: str
     document_id: uuid.UUID
     chunk_index: int

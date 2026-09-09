@@ -10,7 +10,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI
 
 from app import errors
-from app.api import conversations, health, responses
+from app.api import chat_completions, conversations, health, responses
 from app.clients.embed import EmbedClient
 from app.clients.ingest import IngestClient
 from app.clients.llm import LLMClient
@@ -51,6 +51,7 @@ app = FastAPI(title="Agentic RAG", version="2.0.0", lifespan=lifespan)
 app.include_router(health.router)
 app.include_router(responses.router)
 app.include_router(conversations.router)
+app.include_router(chat_completions.router)
 errors.install(app)
 
 

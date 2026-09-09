@@ -3,10 +3,12 @@ from __future__ import annotations
 """Platform ручки управления conversations."""
 
 import uuid
+from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.ids import format_platform_message_id
 from app.auth import current_user
 from app.clients.ingest import RagNotFound
 from app.db import repository as repo
@@ -14,7 +16,7 @@ from app.db.repository import NotFoundOrForbidden
 from app.db.session import get_session
 from app.schemas.conversations import (
     ConversationCreateIn, ConversationListOut, ConversationOut,
-    ConversationUpdateIn,
+    ConversationUpdateIn, MessageOut, MessagesListOut,
 )
 from app.services.rag_config import RagLookupFailed, validate_rag_exists
 from app.state import state
@@ -103,3 +105,39 @@ async def delete_conversation(
         raise HTTPException(404, "Диалог не найден")
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{conversation_id}/messages", response_model=MessagesListOut)
+async def list_messages(
+    conversation_id: uuid.UUID = Path(...),
+    limit: int = Query(default=50, ge=1, le=200,
+                       description="Максимум сообщений в ответе"),
+    before: datetime | None = Query(
+        default=None,
+        description="ISO-datetime cursor: вернуть сообщения с "
+                    "created_at < before. Если не задано — последние N."),
+    user_id: uuid.UUID = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> MessagesListOut:
+    """История сообщений чата — включая failed (для UI)."""
+    try:
+        messages = await repo.list_messages(
+            session, conversation_id, user_id,
+            limit=limit, before=before)
+    except NotFoundOrForbidden:
+        raise HTTPException(404, "Диалог не найден")
+
+    return MessagesListOut(
+        data=[
+            MessageOut(
+                id=format_platform_message_id(m.id),
+                role=m.role,
+                content=m.content,
+                status=m.status,
+                error=m.error,
+                created_at=m.created_at,
+            )
+            for m in messages
+        ],
+        has_more=len(messages) == limit,
+    )
