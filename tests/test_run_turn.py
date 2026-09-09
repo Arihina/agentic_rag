@@ -131,10 +131,11 @@ class HappyPathTests(_RunTurnBase):
 
         async with self.session_maker() as s:
             msgs = await repo.list_messages(s, conv_id, USER)
-        # user + assistant
+        # user + assistant. Порядок по created_at + id (tiebreaker), при
+        # одинаковых timestamp'ах может отличаться от порядка вставки —
+        # ищем по role.
         self.assertEqual(len(msgs), 2)
-        assistant = msgs[1]
-        self.assertEqual(assistant.role, "assistant")
+        assistant = next(m for m in msgs if m.role == "assistant")
         self.assertEqual(assistant.status, "ok")
         self.assertEqual(assistant.content, "ответ")  # default from FakeLLM
 
@@ -149,7 +150,8 @@ class HappyPathTests(_RunTurnBase):
 
         async with self.session_maker() as s:
             msgs = await repo.list_messages(s, conv_id, USER)
-            sources = await repo.list_sources(s, msgs[1].id, USER)
+            assistant = next(m for m in msgs if m.role == "assistant")
+            sources = await repo.list_sources(s, assistant.id, USER)
 
         self.assertEqual(len(sources), 1)
         self.assertEqual(sources[0].chunk_id, "chunk-1")
@@ -167,7 +169,9 @@ class HappyPathTests(_RunTurnBase):
 
         async with self.session_maker() as s:
             msgs = await repo.list_messages(s, conv_id, USER)
-            msg = await repo.get_message(s, msgs[1].id, USER)
+            assistant_id = next(
+                m.id for m in msgs if m.role == "assistant")
+            msg = await repo.get_message(s, assistant_id, USER)
             await s.refresh(msg, attribute_names=["usage"])
 
         self.assertIsNotNone(msg.usage)
@@ -283,7 +287,7 @@ class AgentFailureTests(_RunTurnBase):
         # БД: сообщение помечено failed, error содержит текст.
         async with self.session_maker() as s:
             msgs = await repo.list_messages(s, conv_id, USER)
-        assistant = msgs[1]
+        assistant = next(m for m in msgs if m.role == "assistant")
         self.assertEqual(assistant.status, "failed")
         self.assertIn("ollama таймаут", assistant.error or "")
 
@@ -322,7 +326,7 @@ class ClientDisconnectTests(_RunTurnBase):
         # БД: failed с 'client_disconnected'.
         async with self.session_maker() as s:
             msgs = await repo.list_messages(s, conv_id, USER)
-        assistant = msgs[1]
+        assistant = next(m for m in msgs if m.role == "assistant")
         self.assertEqual(assistant.status, "failed")
         self.assertEqual(assistant.error, "client_disconnected")
 

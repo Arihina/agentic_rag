@@ -53,6 +53,10 @@ class FakeIngest:
     По умолчанию get_rag возвращает валидный ready-набор с id, который
     попросили. Кастомизация — через set_rag() для конкретных id или
     set_error() для эмуляции сбоев ingestion. Реальный HTTP не идёт.
+
+    Для 2.6.a — batch lookup_documents: set_document() заполняет мапу
+    known filenames, set_lookup_error() эмулирует сбой ingestion при
+    lookup (для тестов деградации run_turn).
     """
 
     def __init__(self):
@@ -63,6 +67,14 @@ class FakeIngest:
         # Глобальный сбой (например, IngestError на все запросы).
         self._global_error: Exception | None = None
         self.get_rag_calls: list[tuple[str, str]] = []
+
+        # document_id -> filename; отсутствующие id считаются удалёнными
+        # и в lookup_documents не попадают (silent drop, как в контракте
+        # ingestion).
+        self._documents: dict[str, str] = {}
+        # Если задано — lookup_documents всегда бросает это исключение.
+        self._lookup_error: Exception | None = None
+        self.lookup_calls: list[tuple[str, list[str]]] = []
 
     def set_rag(self, rag_id, *, name="Тестовый набор", status="ready",
                 prompt=None, temperature=0.3, top_k=10,
@@ -80,6 +92,17 @@ class FakeIngest:
 
     def set_global_error(self, exc: Exception | None):
         self._global_error = exc
+
+    def set_document(self, document_id, filename: str):
+        """Зарегистрировать 'существующий' документ для lookup_documents.
+        Незарегистрированные document_id получают silent drop — как в
+        контракте ingestion."""
+        self._documents[str(document_id)] = filename
+
+    def set_lookup_error(self, exc: Exception | None):
+        """Заставить lookup_documents всегда бросать это исключение —
+        для тестов деградации run_turn при сбое ingestion."""
+        self._lookup_error = exc
 
     async def close(self) -> None:
         pass
@@ -106,6 +129,24 @@ class FakeIngest:
             prompt=cfg["prompt"], temperature=cfg["temperature"],
             top_k=cfg["top_k"], score_threshold=cfg["score_threshold"],
         )
+
+    async def lookup_documents(self, user_id, document_ids):
+        """Silent-drop поведение как в контракте ingestion: только те id,
+        что были заранее зарегистрированы через set_document(), попадают
+        в результат. Остальные — просто отсутствуют в возвращаемом dict.
+        """
+        import uuid as _uuid
+        self.lookup_calls.append(
+            (str(user_id), [str(d) for d in document_ids]))
+
+        if self._lookup_error is not None:
+            raise self._lookup_error
+
+        return {
+            _uuid.UUID(str(d)): self._documents[str(d)]
+            for d in document_ids
+            if str(d) in self._documents
+        }
 
 
 class _FakeExecuteResult:
