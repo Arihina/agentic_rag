@@ -2,9 +2,10 @@ from __future__ import annotations
 
 """Клиент к ingestion /v1/internal/* на внутреннем порту 8012.
 
-Сейчас — одна ручка `GET /v1/internal/rags/{id}` для резолва конфига
-набора. В 2.6 добавится `POST /v1/internal/documents/lookup` для batch-
-подстановки filename в message_sources; на этот же клиент.
+Две ручки:
+- `GET /v1/internal/rags/{id}` — резолв конфига набора (2.4.a).
+- `POST /v1/internal/documents/lookup` — batch-подстановка filename по
+  списку document_id.
 
 Инвариант: user_id уходит query-параметром, НЕ заголовком — таков
 контракт /v1/internal/*. Это отличается от платформенных ручек, где
@@ -22,6 +23,9 @@ import httpx
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+_LOOKUP_BATCH_MAX = 100
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,3 +86,45 @@ class IngestClient:
             top_k=payload["top_k"],
             score_threshold=payload["score_threshold"],
         )
+
+    async def lookup_documents(
+        self,
+        user_id: uuid.UUID,
+        document_ids: list[uuid.UUID],
+    ) -> dict[uuid.UUID, str]:
+        """Batch-подстановка filename по массиву document_id."""
+        if not document_ids:
+            return {}
+
+        seen: set[uuid.UUID] = set()
+        unique_ids: list[uuid.UUID] = []
+        for did in document_ids:
+            if did not in seen:
+                seen.add(did)
+                unique_ids.append(did)
+
+        if len(unique_ids) > _LOOKUP_BATCH_MAX:
+            raise IngestError(
+                f"lookup_documents: batch превышает лимит "
+                f"({len(unique_ids)} > {_LOOKUP_BATCH_MAX}). "
+                "Разбейте вызов на несколько.")
+
+        try:
+            response = await self._client.post(
+                "/v1/internal/documents/lookup",
+                params={"user_id": str(user_id)},
+                json={"document_ids": [str(d) for d in unique_ids]},
+            )
+        except httpx.TransportError as e:
+            raise IngestError(f"ingestion недоступен: {e}")
+
+        if response.status_code != 200:
+            raise IngestError(
+                f"ingestion /v1/internal/documents/lookup вернул "
+                f"{response.status_code}: {response.text[:500]}")
+
+        payload = response.json()
+        return {
+            uuid.UUID(entry["document_id"]): entry["filename"]
+            for entry in payload.get("documents", [])
+        }
