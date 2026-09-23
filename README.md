@@ -1,10 +1,12 @@
-# Agentic RAG для технической документации предприятия
+# Agentic RAG
 
-Retrieval-augmented генерация с агентным циклом уточнения над корпусом технической
-документации (регламенты, инструкции, положения). Вместо одного прохода "нашли —
-ответили" система сама оценивает, хватает ли найденного контекста, и при необходимости
-переформулирует запрос и ищет ещё — до нескольких итераций, прежде чем сгенерировать
-финальный ответ.
+Агентский RAG-сервис поверх пользовательских наборов документов. Работает
+как компонент платформы: принимает вопросы через OpenAI-совместимый
+Responses API, ходит в `rag_ingestion_service` за конфигурацией набора и
+именами документов, ищет по OpenSearch (`kb-v2`) через гибридный BM25 +
+kNN + sparse ретривал, использует Ollama (`qwen3:8b`) для переформулировки
+запроса, генерации вариантов, оценки достаточности контекста и финального
+ответа. Ответы стримятся клиенту через SSE, сохраняются в Postgres.
 
 ## Архитектура
 
@@ -65,47 +67,32 @@ Retrieval-augmented генерация с агентным циклом уточ
   `diminishing_returns` (новая итерация пересекается с уже найденным пулом на ≥80% —
   защита от бесполезного дожигания бюджета итераций), `max_iterations` (лимит исчерпан).
 
-## Стек
+Сервис на FastAPI, порт `8020`. Зависимости:
 
-- **Backend**: Python + FastAPI *(FastAPI-обвязка ещё не реализована — см. "Что дальше")*
-- **Хранилище**: OpenSearch (BM25 + kNN в одном движке, Apache 2.0 — выбран вместо
-  Elasticsearch из-за требования к юридической чистоте лицензии для встраивания в
-  коммерческий продукт)
-- **Эмбеддинги**: `intfloat/multilingual-e5-small` по умолчанию (384 dim, через
-  `sentence-transformers`), но модель и префиксы настраиваются в `.env` — так же
-  использовались варианты BAAI/bge (m3 без префиксов, старые bge-v1.5 — с инструкцией
-  только на стороне запроса)
-- **LLM**: Ollama (`gemma2:2b` для локальной разработки, `qwen3.6:35b` в проде через
-  nginx-прокси) — структурированный вывод по JSON Schema через официальный `ollama` client
-- **Конфигурация**: `pydantic-settings`, все параметры и системные промпты — в `.env`
+- **Postgres 16** (порт `5437`) — persistence слой: диалоги, сообщения,
+  источники ответов, usage, feedback.
+- **OpenSearch** (порт `9200`) — гибридный поиск по индексу `kb-v2`.
+- **Ollama** (порт `11434`) — LLM `qwen3:8b` для rewriter/eval/answer.
+- **rag_ingestion_service** (порт `8012` внутренний, `8011` публичный) —
+  резолв конфига набора и filename документов.
 
-## Структура проекта
+Схема одного хода:
 
 ```
-config.py                      # Settings (pydantic-settings), включая все system-промпты
-docker-compose.yml              # OpenSearch + OpenSearch Dashboards, single-node, для теста
-
-opensearch_client.py            # фабрика клиента OpenSearch
-schema.py                       # маппинг индекса (text+russian analyzer / knn_vector)
-embeddings.py                   # обёртка SentenceTransformer с настраиваемыми префиксами query/passage
-hybrid_search.py                # BM25 + kNN + RRF (одиночный и multi-query варианты)
-create_collection_opensearch.py # индексация MinerU JSON+MD документов в OpenSearch
-context_format.py               # общее форматирование чанков в пронумерованный контекст для LLM
-
-llm_client.py                   # клиент Ollama со structured output по pydantic-схеме
-rewriter.py                     # переформулировка запроса с учётом истории диалога
-multi_query.py                  # генерация альтернативных формулировок запроса
-evaluation.py                   # eval + reflection одним вызовом (sufficient/next_queries)
-answer.py                       # генерация финального ответа (+ флаг grounded)
-agent.py                        # оркестратор цикла retrieve -> eval -> (повтор | ответ)
-
-query_search.py                 # интерактивный CLI-поиск по существующей коллекции (без LLM-слоя)
-main.py                         # интерактивный CLI для полного агентного цикла (с LLM-слоем)
-test_search.py                  # smoke-тест инфраструктуры на синтетических данных
-
-requirements.txt
-.env.example
+клиент → POST /v1/responses (SSE)
+  → validate model + get_conversation
+  → resolve rag_config через ingestion
+  → создать pending assistant message
+  → SSE: response.created + response.in_progress
+  → rewriter → multi_query → hybrid_search → evaluate → (?повтор)
+  → answer generation
+  → lookup filenames через ingestion
+  → mark_ok + sources + usage (одна транзакция)
+  → SSE: output_text.delta + response.completed
 ```
+
+Обрыв клиента ловится через `is_disconnected()`: ход прерывается,
+сообщение помечается `failed` с ошибкой `client_disconnected`.
 
 ## Быстрый старт
 
@@ -116,7 +103,7 @@ docker compose up -d
 curl http://localhost:9200/_cluster/health?pretty
 ```
 
-Если контейнер падает при старте — проверь `vm.max_map_count` на хосте:
+Если контейнер падает при старте — проверить `vm.max_map_count` на хосте:
 ```bash
 sudo sysctl -w vm.max_map_count=262144
 ```
@@ -173,6 +160,9 @@ PASSAGE_PREFIX=""
 python test_search.py --setup                 # создаёт индекс + 4 синтетических чанка
 python test_search.py "как обслуживать щит"
 ```
+```bash
+curl -s http://127.0.0.1:8020/health | jq
+```
 
 ### 4. Проиндексировать реальные документы
 
@@ -189,65 +179,597 @@ python test_search.py "как обслуживать щит"
 python create_collection_opensearch.py --input_dir ./data --reset
 ```
 
-### 5. Проверить retrieval отдельно (без LLM-слоя)
-
-```bash
-python query_search.py                         # интерактивный REPL
-python query_search.py "как обслуживать РЩ-3"
-```
-В REPL: строка с `|` между вариантами запускает multi-query вместо одиночного поиска.
-
-### 6. Прогнать полный агентный цикл
-
-```bash
-python main.py
-python main.py "как обслуживать РЩ-3" --top_k 5 --max_iterations 3
-```
-В интерактивном режиме история диалога копится автоматически — можно проверить, как
-rewriter разворачивает "а как часто это делать?" в самодостаточный запрос.
-
 ## Конфигурация (`.env`)
 
-| Переменная | Назначение |
-|---|---|
-| `OPENSEARCH_HOST`, `OPENSEARCH_PORT`, `OPENSEARCH_USE_SSL` | подключение к OpenSearch |
-| `OPENSEARCH_INDEX` | имя индекса (алиас поля `index_name`) |
-| `EMBEDDING_MODEL`, `EMBEDDING_DIM` | модель эмбеддингов и размерность вектора (менять вместе — размерность у моделей разная) |
-| `QUERY_PREFIX`, `PASSAGE_PREFIX` | префиксы для эмбеддингов запроса/документа — зависят от модели (e5: `"query: "`/`"passage: "`, bge-m3: пустые, старые bge-v1.5: инструкция только у запроса) |
-| `OLLAMA_BASE_URL`, `LLM_MODEL` | адрес Ollama и имя модели |
-| `LLM_REQUEST_TIMEOUT`, `LLM_MAX_RETRIES` | таймаут и число ретраев при невалидном JSON от LLM |
-| `REWRITER_TEMPERATURE`, `MULTI_QUERY_TEMPERATURE`, `ANSWER_TEMPERATURE`, `EVAL_TEMPERATURE` | температуры по ролям |
-| `MULTI_QUERY_VARIANTS_COUNT` | сколько альтернативных формулировок генерировать |
-| `MAX_ITERATIONS` | лимит итераций retrieve→eval цикла |
-| `EARLY_STOP_OVERLAP_RATIO` | порог пересечения с пулом для остановки по diminishing returns |
-| `REWRITER_SYSTEM_PROMPT`, `MULTI_QUERY_SYSTEM_PROMPT_TEMPLATE`, `ANSWER_SYSTEM_PROMPT`, `EVAL_SYSTEM_PROMPT` | системные промпты — правки без деплоя кода |
+Всё через переменные окружения (префикс `AGENTIC_RAG_`). Полный список
+с дефолтами — в `.env.example`. Ключевые:
 
-Многострочные промпты в `.env` — в двойных кавычках (внутри можно использовать одинарные).
+| Переменная | Назначение | Пример |
+|---|---|---|
+| `AGENTIC_RAG_DATABASE_URL` | Postgres | `postgresql+asyncpg://rag:rag@localhost:5432/agentic_rag?ssl=disable` |
+| `AGENTIC_RAG_OPENSEARCH_URL` | OpenSearch | `http://localhost:9200` |
+| `AGENTIC_RAG_LLM_BASE_URL` | Ollama | `http://localhost:11434` |
+| `AGENTIC_RAG_INGEST_INTERNAL_URL` | Internal API ingestion | `http://localhost:8012` |
+| `AGENTIC_RAG_TOKENIZER_REPO` | HF-токенайзер | `Qwen/Qwen3-8B` |
+| `AGENTIC_RAG_HISTORY_TOKEN_LIMIT` | Sliding window | `3000` |
+| `AGENTIC_RAG_MAX_ITERATIONS` | Макс. итераций агентского цикла | `3` |
+| `AGENTIC_RAG_SSE_HEARTBEAT_INTERVAL` | Секунды между heartbeat SSE | `15` |
 
-## Известные ограничения и технический долг
+**Про `?ssl=disable` в DATABASE_URL:** asyncpg 0.30+ по умолчанию пробует
+TLS handshake, а Postgres в контейнере на него не настроен и обрывает.
+Для локального stack всегда добавляй `?ssl=disable`. Для внешнего
+Postgres с сертификатом — `?ssl=require`.
 
-- **RRF-score не сравним между итерациями агентного цикла.** Это ранговая метрика,
-  пересчитываемая заново на каждом заходе `multi_query_hybrid_search`. Для генерации
-  ответа и eval это не проблема (LLM смотрит на текст), но сортировать
-  `trace.final_chunks` по `_rrf_score` как единый рейтинг — некорректно.
-- **Нет дедупликации между JSON- и MD-источниками одного документа.** Один и тот же
-  фрагмент нередко попадает в топ дважды — как json-чанк и как md-чанк с тем же текстом.
-  В старом ChromaDB-пайплайне была семантическая дедупликация, здесь её пока нет.
-- **`_demote_list_titles` — пунктуационная эвристика**, настроенная на русский
-  регламентный стиль перечислений (`;` в конце пункта). MinerU иногда маркирует пункты
-  списка тем же `type: "title"`, что и настоящие заголовки (отличаются только по
-  `level`) — без этой эвристики каждый пункт списка становился отдельным чанком и
-  портил breadcrumb. Для двойной вложенности списков (список внутри пункта списка)
-  возможна потеря точности breadcrumb на внутреннем уровне (контент не теряется, теряется
-  только точность навигации).
-- **`eval`/`answer` иногда расходятся во мнении** на слабых моделях (наблюdалось на
-  gemma2:2b: eval сказал `sufficient=True`, при этом сам заполнил `next_queries`,
-  который по промпту должен быть пустым при sufficient=true; `answer` для того же
-  контекста поставил `grounded=False`). Стоит перепроверить на qwen3.6:35b перед тем,
-  как чинить промпты — возможно, проблема в возможностях модели, а не в формулировках.
-- **FastAPI-обвязка не реализована** — сейчас весь цикл тестируется через `main.py` в
-  терминале. HTTP-слой, Postgres для истории чатов и пользовательских данных — следующий
-  этап.
-- **Суб-агенты не реализованы** — сейчас единый агент с вызовом инструментов
-  (rewriter/multi-query/eval как функции, не как отдельные агенты). Возможное развитие,
-  не текущая необходимость.
+## API
+
+### Аутентификация
+
+Все ручки, кроме `/health`, требуют заголовок `X-User-Id`. Внутренний
+контракт платформы: master ставит его из своей аутентификации, при
+прямом обращении к сервису (dev, CLI) передавать вручную.
+
+```
+X-User-Id: 11111111-1111-1111-1111-111111111111
+```
+
+Отсутствие → **401**. Невалидный UUID → **401**.
+
+### Формат id сообщений
+
+Сервис принимает id сообщений в четырёх формах — они все распарсиваются
+в один и тот же UUID:
+
+- `resp_<uuid>` — от Responses API (`POST /v1/responses`, `GET /v1/responses/{id}`);
+- `msg_<uuid>` — от platform listings (`GET /v1/platform/conversations/{id}/messages`);
+- `chatcmpl-<uuid>` — OpenAI Chat Completions формат (для совместимости с OpenAI SDK);
+- голый `<uuid>` — если клиент сохранил id без префикса.
+
+На выход префикс зависит от endpoint'а:
+
+- Responses API отдаёт `resp_<uuid>`;
+- Platform listings — `msg_<uuid>`.
+
+Feedback и sources ручки принимают любую форму — можно смело пересылать
+id, каким его сохранил клиент.
+
+### Health
+
+**`GET /health`** — 200 всегда (даже при `degraded`), чтобы Kubernetes не
+рестартил инстанс из-за временной недоступности зависимостей.
+
+```bash
+curl -s http://127.0.0.1:8020/health
+```
+
+```json
+{
+  "status": "ok",
+  "ready": true,
+  "opensearch": true,
+  "ollama": true,
+  "ingestion": true,
+  "database": true
+}
+```
+
+`status` = `starting` (lifespan ещё не завершил), `ok` (все up), либо
+`degraded` (хоть одна зависимость down).
+
+**`GET /health/ready`** — 200 если `state.ready` установлен, иначе 503.
+
+---
+
+### Responses API
+
+Основной endpoint для генерации ответа.
+
+#### `POST /v1/responses`
+
+Тело:
+
+```json
+{
+  "model": "rag/22222222-2222-2222-2222-222222222222",
+  "input": "Как настроить SSL для внутреннего сервиса?",
+  "conversation_id": "33333333-3333-3333-3333-333333333333",
+  "stream": true
+}
+```
+
+| Поле | Тип | Обязательно | Описание |
+|---|---|:-:|---|
+| `model` | `str` | ✓ | `rag/<uuid набора>` — маршрутизация в master, `<uuid>` идентифицирует конкретный набор |
+| `input` | `str` | ✓ | Текст вопроса |
+| `conversation_id` | UUID | ✓ | Диалог, к которому относится вопрос |
+| `stream` | `bool` | — | Всегда `true` в MVP; поле оставлено для совместимости с OpenAI SDK |
+
+Возвращает `text/event-stream` со следующей последовательностью:
+
+```
+event: response.created
+data: {"id":"resp_<uuid>","object":"response","status":"in_progress",...}
+
+event: response.in_progress
+data: {"id":"resp_<uuid>","status":"in_progress"}
+
+: ping                    ← keepalive каждые ~15 сек при долгом ходе
+
+event: response.output_text.delta
+data: {"id":"resp_<uuid>","delta":"Полный текст ответа..."}
+
+event: response.completed
+data: {"id":"resp_<uuid>","status":"completed","usage":{"prompt_tokens":...}}
+```
+
+**Пример curl:**
+
+```bash
+curl -N -X POST http://127.0.0.1:8020/v1/responses \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "rag/22222222-2222-2222-2222-222222222222",
+    "input": "Как настроить SSL для внутреннего сервиса?",
+    "conversation_id": "33333333-3333-3333-3333-333333333333"
+  }'
+```
+
+Флаг `-N` в curl отключает буферизацию — иначе SSE-фреймы приходят
+пачками.
+
+**Ошибки** приходят как SSE-фрейм `response.error`, не HTTP-код (клиент
+уже открыл поток и ждёт SSE):
+
+```
+event: response.error
+data: {"error":{"message":"Диалог не найден","type":"not_found_error"}}
+```
+
+Возможные ошибки: конверсация не найдена, набор не найден, набор не
+`ready`, `model` не совпадает с `conversation.rag_id`.
+
+**HTTP 400** возвращается только при валидации pydantic (пустой input,
+битый UUID conversation_id, невалидное тело JSON).
+
+#### `GET /v1/responses/{response_id}`
+
+Снапшот сохранённого ответа. Использовать когда клиент потерял
+SSE-соединение или хочет проверить статус.
+
+```bash
+curl -s -X GET \
+  http://127.0.0.1:8020/v1/responses/resp_44444444-4444-4444-4444-444444444444 \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+Ответ:
+
+```json
+{
+  "id": "resp_44444444-4444-4444-4444-444444444444",
+  "object": "response",
+  "created_at": 1737123456,
+  "status": "completed",
+  "model": "rag/22222222-2222-2222-2222-222222222222",
+  "conversation_id": "33333333-3333-3333-3333-333333333333",
+  "output": [{
+    "type": "message",
+    "id": "msg_44444444-4444-4444-4444-444444444444",
+    "role": "assistant",
+    "status": "completed",
+    "content": [{"type": "output_text", "text": "SSL настраивается..."}]
+  }],
+  "usage": {"prompt_tokens": 850, "completion_tokens": 120, "total_tokens": 970},
+  "error": null
+}
+```
+
+`status`: `completed` (готов), `in_progress` (внутренний `pending`),
+`failed`. `output` пустой при `in_progress` или `failed` без частичного
+ответа; `error` заполнен при `failed`.
+
+---
+
+### Platform: Conversations
+
+CRUD над чатами.
+
+#### `POST /v1/platform/conversations` — создать
+
+Тело:
+
+```json
+{
+  "rag_id": "22222222-2222-2222-2222-222222222222",
+  "title": "Настройка SSL"
+}
+```
+
+| Поле | Тип | Обязательно |
+|---|---|:-:|
+| `rag_id` | UUID | ✓ |
+| `title` | `str` (≤500 символов) | — |
+
+**Валидация `rag_id`:** через `rag_ingestion_service`. Набор должен
+существовать и принадлежать пользователю; статус набора при этом **не**
+проверяется — можно создать чат на набор в статусе `empty`/`ingesting`
+(«зарезервировать» диалог до готовности документов).
+
+```bash
+curl -s -X POST http://127.0.0.1:8020/v1/platform/conversations \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "rag_id": "22222222-2222-2222-2222-222222222222",
+    "title": "Настройка SSL"
+  }'
+```
+
+**201 Created:**
+
+```json
+{
+  "id": "33333333-3333-3333-3333-333333333333",
+  "rag_id": "22222222-2222-2222-2222-222222222222",
+  "title": "Настройка SSL",
+  "created_at": "2026-01-15T10:23:45.123456+00:00",
+  "updated_at": "2026-01-15T10:23:45.123456+00:00"
+}
+```
+
+Ошибки:
+- **404** — набор не найден.
+- **502** — `rag_ingestion_service` недоступен.
+- **400** — пустое/невалидное тело, попытка передать поле не из схемы.
+
+#### `GET /v1/platform/conversations` — список
+
+Все чаты текущего пользователя. Порядок — `updated_at DESC` (недавно
+активные наверху). Лимит фиксирован в репозитории (100).
+
+```bash
+curl -s -X GET http://127.0.0.1:8020/v1/platform/conversations \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "33333333-3333-3333-3333-333333333333",
+      "rag_id": "22222222-2222-2222-2222-222222222222",
+      "title": "Настройка SSL",
+      "created_at": "2026-01-15T10:23:45+00:00",
+      "updated_at": "2026-01-15T10:25:12+00:00"
+    }
+  ]
+}
+```
+
+#### `GET /v1/platform/conversations/{id}` — один
+
+```bash
+curl -s -X GET \
+  http://127.0.0.1:8020/v1/platform/conversations/33333333-3333-3333-3333-333333333333 \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+Возвращает тот же формат, что и элемент из `list`.
+
+**404** — не существует или принадлежит другому пользователю (не
+различаем — иначе через 404-vs-403 утекает информация о чужих id).
+
+#### `PATCH /v1/platform/conversations/{id}` — переименовать
+
+Меняем **только** `title`. `rag_id` фиксирован при создании; попытка
+передать `rag_id` → **400**.
+
+```bash
+curl -s -X PATCH \
+  http://127.0.0.1:8020/v1/platform/conversations/33333333-3333-3333-3333-333333333333 \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "Content-Type: application/json" \
+  -d '{"title": "SSL — production"}'
+```
+
+Тело:
+
+```json
+{
+  "title": "Новое название"
+}
+```
+
+Пустой `title` → **400** (для очистки заголовка используй `null` при
+создании; PATCH обязывает непустое значение).
+
+#### `DELETE /v1/platform/conversations/{id}` — удалить
+
+CASCADE удаляет messages, sources, usage, feedback.
+
+```bash
+curl -s -X DELETE \
+  http://127.0.0.1:8020/v1/platform/conversations/33333333-3333-3333-3333-333333333333 \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+**204 No Content** (без тела).
+
+#### `GET /v1/platform/conversations/{id}/messages` — история
+
+История чата, включая failed сообщения (для UI). Cursor-based
+пагинация «в сторону older»: первый вызов даёт последние N сообщений,
+`before=<created_at>` подгружает более старые.
+
+Query-параметры:
+
+| Параметр | Тип | Дефолт | Описание |
+|---|---|---|---|
+| `limit` | `int` (1-200) | 50 | Максимум записей в ответе |
+| `before` | ISO datetime | — | `created_at < before`; для подгрузки старее |
+
+```bash
+# Первая страница (последние 50)
+curl -s -X GET \
+  "http://127.0.0.1:8020/v1/platform/conversations/33333333-3333-3333-3333-333333333333/messages" \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+
+# Load older: передать created_at первой видимой записи
+curl -s -X GET \
+  "http://127.0.0.1:8020/v1/platform/conversations/33333333-3333-3333-3333-333333333333/messages?limit=50&before=2026-01-15T10:23:45%2B00:00" \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+Ответ:
+
+```json
+{
+  "data": [
+    {
+      "id": "msg_55555555-5555-5555-5555-555555555555",
+      "object": "message",
+      "role": "user",
+      "content": "Как настроить SSL?",
+      "status": "ok",
+      "error": null,
+      "created_at": "2026-01-15T10:24:00+00:00"
+    },
+    {
+      "id": "msg_44444444-4444-4444-4444-444444444444",
+      "object": "message",
+      "role": "assistant",
+      "content": "SSL настраивается...",
+      "status": "ok",
+      "error": null,
+      "created_at": "2026-01-15T10:24:35+00:00"
+    }
+  ],
+  "has_more": false
+}
+```
+
+`has_more`: `true` если пришло ровно `limit` записей (возможно есть
+ещё). Порядок в `data` — по `created_at ASC` (старые сверху, как в
+UI-чатах).
+
+**`status`** в MessageOut — внутренняя терминология БД (`ok`, `pending`,
+`failed`). Отличается от Responses API-снапшота, где `ok → completed`.
+
+---
+
+### Feedback
+
+Оценка ответа пользователем. JSONB partial update: ключи мержатся, не
+перезаписывают целиком.
+
+#### `POST /v1/chat/completions/{message_id}/feedback` — upsert
+
+Тело — произвольный JSON-объект (min 1 ключ):
+
+```bash
+curl -s -X POST \
+  http://127.0.0.1:8020/v1/chat/completions/resp_44444444-4444-4444-4444-444444444444/feedback \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "Content-Type: application/json" \
+  -d '{"rating": 5, "helpful": true, "tags": ["точно", "полно"]}'
+```
+
+**200 OK:**
+
+```json
+{
+  "message_id": "44444444-4444-4444-4444-444444444444",
+  "data": {"rating": 5, "helpful": true, "tags": ["точно", "полно"]},
+  "created_at": "2026-01-15T10:25:00+00:00",
+  "updated_at": "2026-01-15T10:25:00+00:00"
+}
+```
+
+**Повторный POST** — merge (JSONB `||`): существующие ключи, не
+упомянутые в новом теле, сохраняются:
+
+```bash
+curl -s -X POST \
+  http://127.0.0.1:8020/v1/chat/completions/resp_44444444-4444-4444-4444-444444444444/feedback \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111" \
+  -H "Content-Type: application/json" \
+  -d '{"comment": "Отличный ответ!"}'
+```
+
+Итог: `{"rating": 5, "helpful": true, "tags": [...], "comment": "..."}`.
+
+Ошибки:
+- **400** — пустое тело `{}` (нечего мержить).
+- **404** — сообщение не найдено / принадлежит другому пользователю.
+
+#### `GET /v1/chat/completions/{message_id}/feedback`
+
+```bash
+curl -s -X GET \
+  http://127.0.0.1:8020/v1/chat/completions/resp_44444444-4444-4444-4444-444444444444/feedback \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+Три возможных ответа:
+
+- **200 + `FeedbackOut`** — feedback есть.
+- **200 + `null`** — сообщение есть, feedback ещё не оставляли (важно для
+  UI, чтобы показать кнопку «оценить»).
+- **404** — сообщения нет / чужое.
+
+#### `DELETE /v1/chat/completions/{message_id}/feedback`
+
+```bash
+curl -s -X DELETE \
+  http://127.0.0.1:8020/v1/chat/completions/resp_44444444-4444-4444-4444-444444444444/feedback \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+**204 No Content**. Идемпотентно — второй вызов тоже 204, даже если
+feedback уже удалён (а сообщение всё ещё существует).
+
+---
+
+### Sources
+
+Источники ответа — какие чанки и из каких документов использовались.
+
+#### `GET /v1/chat/completions/{message_id}/sources`
+
+```bash
+curl -s -X GET \
+  http://127.0.0.1:8020/v1/chat/completions/resp_44444444-4444-4444-4444-444444444444/sources \
+  -H "X-User-Id: 11111111-1111-1111-1111-111111111111"
+```
+
+**200 OK:**
+
+```json
+{
+  "data": [
+    {
+      "order": 1,
+      "chunk_id": "a1b2c3d4e5f6...",
+      "document_id": "66666666-6666-6666-6666-666666666666",
+      "chunk_index": 3,
+      "filename": "ssl-guide.pdf"
+    },
+    {
+      "order": 2,
+      "chunk_id": "f6e5d4c3b2a1...",
+      "document_id": "77777777-7777-7777-7777-777777777777",
+      "chunk_index": 0,
+      "filename": "(удалён)"
+    }
+  ]
+}
+```
+
+`order` — нумерация `[N]` в тексте ответа. Клиент подсвечивает `[1]`,
+`[2]`... и подтягивает соответствующий элемент.
+
+`filename` — снимок на момент ответа: имя, которое было у документа в
+`rag_ingestion_service` при завершении хода. Если документ переименуют
+или удалят потом — snapshot остаётся. Плейсхолдер `(удалён)` появляется
+в двух случаях:
+
+- документ уже был удалён к моменту финализации хода;
+- `rag_ingestion_service` был недоступен при попытке batch-lookup
+  filename (деградация — ход всё равно завершается `ok`).
+
+Пустой `data: []` — валидный ответ: сообщение без источников (например,
+`failed` до этапа search).
+
+**404** — сообщение не найдено / чужое.
+
+## Типичный сценарий (end-to-end)
+
+Полный цикл: создать чат, задать вопрос, прочитать историю, оценить
+ответ.
+
+```bash
+USER=11111111-1111-1111-1111-111111111111
+RAG=22222222-2222-2222-2222-222222222222
+
+# 1. Создать чат
+CONV=$(curl -s -X POST http://127.0.0.1:8020/v1/platform/conversations \
+  -H "X-User-Id: $USER" \
+  -H "Content-Type: application/json" \
+  -d "{\"rag_id\": \"$RAG\", \"title\": \"Первый чат\"}" \
+  | jq -r .id)
+
+# 2. Задать вопрос (SSE)
+curl -N -X POST http://127.0.0.1:8020/v1/responses \
+  -H "X-User-Id: $USER" \
+  -H "Content-Type: application/json" \
+  -d "{\"model\": \"rag/$RAG\", \"input\": \"Как настроить SSL?\", \"conversation_id\": \"$CONV\"}"
+
+# 3. Достать id ответа из SSE-потока — из response.created:
+# event: response.created
+# data: {"id":"resp_44444444-...", ...}
+RESP=resp_44444444-4444-4444-4444-444444444444
+
+# 4. Прочитать историю
+curl -s -X GET "http://127.0.0.1:8020/v1/platform/conversations/$CONV/messages" \
+  -H "X-User-Id: $USER" | jq
+
+# 5. Прочитать источники ответа
+curl -s -X GET "http://127.0.0.1:8020/v1/chat/completions/$RESP/sources" \
+  -H "X-User-Id: $USER" | jq
+
+# 6. Оценить ответ
+curl -s -X POST "http://127.0.0.1:8020/v1/chat/completions/$RESP/feedback" \
+  -H "X-User-Id: $USER" \
+  -H "Content-Type: application/json" \
+  -d '{"rating": 5, "helpful": true}' | jq
+```
+
+## Разработка
+
+### Тесты
+
+```bash
+# Все тесты (использует SQLite in-memory + FakeIngest — без реальных БД/ollama)
+python -m unittest discover -s tests -t .
+
+# Отдельный модуль
+python -m unittest tests.test_api_responses -v
+
+# Live-тесты (требуют реальный Postgres/Ollama/OpenSearch/HF-модель)
+# AGENTIC_RAG_TESTS_LIVE=1 python -m unittest tests.test_live -v
+```
+
+Тесты используют fakes (`tests/support.py`, `tests/core_fakes.py`) вместо
+внешних сервисов, чтобы CI не тянул ML-модели и не требовал сети. Для
+проверки реальной интеграции — см. Live-режим (2.9).
+
+### Миграции
+
+```bash
+# Новая миграция после правки моделей
+alembic revision --autogenerate -m "add tags column"
+# Просмотреть сгенерированный файл в alembic/versions/, поправить при необходимости
+alembic upgrade head
+
+# Откат последней
+alembic downgrade -1
+
+# Полный сброс dev-БД (данные пропадают)
+docker compose down -v && docker compose up -d
+alembic upgrade head
+```
+
+### Отладочный CLI
+
+Прогнать один запрос против живого стека, без HTTP:
+
+```bash
+python -m app.debug.query \
+  --rag-id 22222222-2222-2222-2222-222222222222 \
+  --query "Как настроить SSL?" \
+  --top-k 5 \
+  --score-threshold 0.3
+```
+
+Печатает `AgentTrace` (все стадии цикла) в pretty-JSON. Требует
+запущенные Ollama, OpenSearch, ingestion. Не пишет в Postgres.
