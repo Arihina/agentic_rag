@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     sse_heartbeat_interval: float = 15.0
 
     database_url: str = (
-        "postgresql+asyncpg://rag:rag@localhost:5437/agentic_rag?ssl=disable")
+        "postgresql+asyncpg://rag:rag@localhost:5438/agentic_rag?ssl=disable")
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
