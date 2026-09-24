@@ -96,62 +96,18 @@ kNN + sparse ретривал, использует Ollama (`qwen3:8b`) для �
 
 ## Быстрый старт
 
-### 1. Поднять OpenSearch
+### 1. Поднять БД
 
 ```bash
 docker compose up -d
 curl http://localhost:9200/_cluster/health?pretty
 ```
 
-Если контейнер падает при старте — проверить `vm.max_map_count` на хосте:
-```bash
-sudo sysctl -w vm.max_map_count=262144
-```
-
-Dashboards (аналог Kibana) — `http://<host>:5601`.
 
 ### 2. Установить зависимости
 
 ```bash
 pip install -r requirements.txt --break-system-packages
-```
-
-Пример заполнения `.env`
-```
-OPENSEARCH_HOST=localhost
-OPENSEARCH_PORT=9200
-OPENSEARCH_USE_SSL=false
-OPENSEARCH_INDEX=knowledge_base
-
-EMBEDDING_MODEL=intfloat/multilingual-e5-small
-EMBEDDING_DIM=384
-
-PASSAGE_PREFIX=""
-
-QUERY_PREFIX="query: "
-PASSAGE_PREFIX="passage: "
-
-LLM_MODEL=gemma2:2b
-OLLAMA_BASE_URL=http://localhost:11434
-
-LLM_REQUEST_TIMEOUT=360.0
-LLM_MAX_RETRIES=2
-REWRITER_TEMPERATURE=0.0
-MULTI_QUERY_TEMPERATURE=0.7
-MULTI_QUERY_VARIANTS_COUNT=3
-
-EVAL_TEMPERATURE=0.0
-MAX_ITERATIONS=3
-EARLY_STOP_OVERLAP_RATIO=0.8
-```
-или
-```
-EMBEDDING_MODEL=BAAI/bge-m3
-LLM_MODEL=qwen3.6:35b
-EMBEDDING_DIM=1024
-PASSAGE_PREFIX=""
-QUERY_PREFIX=""
-PASSAGE_PREFIX=""
 ```
 
 ### 3. Проверить инфраструктуру (без реальных данных)
