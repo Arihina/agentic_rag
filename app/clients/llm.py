@@ -12,17 +12,38 @@ system-инструкции — молчаливо и без warnings.
 """
 
 import asyncio
+import json
 import logging
 from typing import Any, Type, TypeVar
 
 from ollama import AsyncClient, ResponseError
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _unwrap_properties(data: Any, response_model: Type[T]) -> Any:
+    if not isinstance(data, dict):
+        return data
+    props = data.get("properties")
+    if isinstance(props, dict) and not (set(response_model.model_fields)
+                                        & set(data)):
+        return props
+    return data
+
+
+def _parse_structured(raw: str, response_model: Type[T]) -> T:
+    """Распарсить сырой ответ Ollama в pydantic-модель."""
+    text = raw.strip()
+    if not text:
+        raise ValueError("ollama вернула пустой ответ")
+    data = json.loads(text)
+    data = _unwrap_properties(data, response_model)
+    return response_model.model_validate(data)
 
 
 class LLMError(RuntimeError):
@@ -44,8 +65,6 @@ class LLMClient:
         )
 
     async def close(self) -> None:
-        # AsyncClient — обёртка над httpx.AsyncClient, чей внутренний
-        # ресурс закрывается вот так.
         inner = getattr(self._client, "_client", None)
         if inner is not None and hasattr(inner, "aclose"):
             await inner.aclose()
@@ -123,17 +142,31 @@ class LLMClient:
         """format="json" + валидация в pydantic; при невалидном JSON — повтор
         внутри того же retry-бюджета."""
         schema_hint = response_model.model_json_schema()
-        raw = await self.generate(
-            model=model,
-            system=system + f"\n\nОтвет строго в JSON по схеме: {schema_hint}",
-            prompt=prompt,
-            temperature=temperature,
-            num_ctx=num_ctx,
-            format="json",
-        )
-        try:
-            return response_model.model_validate_json(raw)
-        except ValidationError as e:
-            raise LLMError(
-                f"ollama вернула невалидный JSON для {response_model.__name__}: "
-                f"{e}\nСырой ответ: {raw[:500]}")
+        system = system + f"\n\nОтвет строго в JSON по схеме: {schema_hint}"
+
+        last_raw = ""
+        last_error: Exception | None = None
+        for attempt in range(1, settings.llm_retry_attempts + 1):
+            raw = await self.generate(
+                model=model,
+                system=system,
+                prompt=prompt,
+                temperature=temperature,
+                num_ctx=num_ctx,
+                format="json",
+            )
+            last_raw = raw
+            try:
+                return _parse_structured(raw, response_model)
+            except ValueError as e:
+                last_error = e
+                logger.warning(
+                    "ollama вернула невалидный JSON на попытке %d/%d: %s",
+                    attempt, settings.llm_retry_attempts, e)
+
+            if attempt < settings.llm_retry_attempts:
+                await asyncio.sleep(settings.llm_retry_backoff * attempt)
+
+        raise LLMError(
+            f"ollama вернула невалидный JSON для {response_model.__name__}: "
+            f"{last_error}\nСырой ответ: {last_raw[:500]}")
