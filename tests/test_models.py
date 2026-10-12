@@ -16,7 +16,9 @@ import unittest
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.schema import CreateTable
 
 from app.db.models import (
     Conversation, Message, MessageFeedback, MessageSource, MessageUsage,
@@ -225,6 +227,22 @@ class ModelsCrudTests(unittest.IsolatedAsyncioTestCase):
             await s.refresh(fresh, attribute_names=["messages"])
             contents = [m.content for m in fresh.messages]
             self.assertEqual(contents, ["1", "2", "3"])
+
+
+class MessageCreatedAtDefaultTests(unittest.TestCase):
+    """Регрессия: на Postgres created_at должен быть per-statement
+    (clock_timestamp), чтобы user и assistant в одной транзакции не
+    получали одинаковый timestamp и не путались в UI."""
+
+    def test_postgres_default_is_clock_timestamp(self):
+        ddl = str(CreateTable(Message.__table__).compile(
+            dialect=postgresql.dialect()))
+        self.assertIn("clock_timestamp()", ddl)
+
+    def test_sqlite_default_is_current_timestamp(self):
+        ddl = str(CreateTable(Message.__table__).compile(
+            dialect=sqlite.dialect()))
+        self.assertIn("CURRENT_TIMESTAMP", ddl)
 
 
 if __name__ == "__main__":
