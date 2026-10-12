@@ -10,12 +10,30 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.sql.expression import FunctionElement
 from sqlalchemy.types import JSON, TypeDecorator, CHAR
 
 
 class Base(DeclarativeBase):
     ...
+
+
+class now_clock(FunctionElement):
+    name = "now_clock"
+    inherit_cache = True
+
+
+@compiles(now_clock)
+def _compile_now_clock(element, compiler, **kw):
+    # SQLite и прочие диалекты: стандартный CURRENT_TIMESTAMP.
+    return "CURRENT_TIMESTAMP"
+
+
+@compiles(now_clock, "postgresql")
+def _compile_now_clock_pg(element, compiler, **kw):
+    return "clock_timestamp()"
 
 
 class UUIDType(TypeDecorator):
@@ -86,7 +104,7 @@ class Message(Base):
         String(16), nullable=False, default="ok")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False)
+        DateTime(timezone=True), server_default=now_clock(), nullable=False)
 
     conversation: Mapped["Conversation"] = relationship(
         back_populates="messages")
