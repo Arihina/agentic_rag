@@ -15,8 +15,8 @@ from app.db import repository as repo
 from app.db.repository import NotFoundOrForbidden
 from app.db.session import get_session
 from app.schemas.conversations import (
-    ConversationCreateIn, ConversationListOut, ConversationOut,
-    ConversationUpdateIn, MessageOut, MessagesListOut,
+    ConversationCreateIn, ConversationOut, ConversationUpdateIn, MessageOut,
+    MessagesListOut,
 )
 from app.services.rag_config import RagLookupFailed, validate_rag_exists
 from app.state import state
@@ -46,16 +46,15 @@ async def create_conversation(
     return ConversationOut.model_validate(conv, from_attributes=True)
 
 
-@router.get("", response_model=ConversationListOut)
+@router.get("", response_model=list[ConversationOut])
 async def list_conversations(
     user_id: uuid.UUID = Depends(current_user),
     session: AsyncSession = Depends(get_session),
-) -> ConversationListOut:
+) -> list[ConversationOut]:
     """Список чатов пользователя"""
     convs = await repo.list_conversations(session, user_id)
-    return ConversationListOut(
-        data=[ConversationOut.model_validate(c, from_attributes=True)
-              for c in convs])
+    return [ConversationOut.model_validate(c, from_attributes=True)
+            for c in convs]
 
 
 @router.get("/{conversation_id}", response_model=ConversationOut)

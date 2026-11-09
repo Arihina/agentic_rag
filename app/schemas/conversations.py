@@ -37,11 +37,6 @@ class ConversationOut(BaseModel):
     updated_at: datetime
 
 
-class ConversationListOut(BaseModel):
-    """Обёртка для GET /v1/platform/conversations. data: [...]"""
-    data: list[ConversationOut]
-
-
 class MessageOut(BaseModel):
     """Одно сообщение в истории чата."""
     id: str = Field(description="msg_<uuid> — префиксированный id")

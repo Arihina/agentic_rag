@@ -224,7 +224,7 @@ class ListConversationsTests(_ConversationsHttpBase):
                 self._restore_state()
 
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json(), {"data": []})
+        self.assertEqual(r.json(), [])
 
     def test_only_own_conversations(self):
         """Скоупинг: чужие в список не попадают."""
@@ -241,7 +241,7 @@ class ListConversationsTests(_ConversationsHttpBase):
             finally:
                 self._restore_state()
 
-        titles = {c["title"] for c in r.json()["data"]}
+        titles = {c["title"] for c in r.json()}
         self.assertEqual(titles, {"Мой 1", "Мой 2"})
 
     def test_requires_x_user_id(self):

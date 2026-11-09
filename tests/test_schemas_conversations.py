@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from pydantic import ValidationError
 
 from app.schemas.conversations import (
-    ConversationCreateIn, ConversationListOut, ConversationOut,
-    ConversationUpdateIn, MessageOut, MessagesListOut,
+    ConversationCreateIn, ConversationOut, ConversationUpdateIn, MessageOut,
+    MessagesListOut,
 )
 
 
@@ -100,21 +100,6 @@ class ConversationOutTests(unittest.TestCase):
             id=CID, rag_id=RAG, title=None,
             created_at=now, updated_at=now)
         self.assertIsNone(out.title)
-
-
-class ConversationListOutTests(unittest.TestCase):
-
-    def test_empty_list(self):
-        out = ConversationListOut(data=[])
-        self.assertEqual(out.data, [])
-
-    def test_wraps_items(self):
-        now = datetime.now(timezone.utc)
-        item = ConversationOut(
-            id=CID, rag_id=RAG, title="X",
-            created_at=now, updated_at=now)
-        out = ConversationListOut(data=[item])
-        self.assertEqual(len(out.data), 1)
 
 
 class MessageOutTests(unittest.TestCase):
